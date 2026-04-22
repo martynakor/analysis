@@ -1,0 +1,592 @@
+#1. Import packages
+
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import matplotlib
+import pandas as pd
+import numpy as np
+import itertools
+import textwrap
+import os
+import subprocess
+import platform
+from collections import Counter
+
+# Detect environment
+try:
+    from google.colab import files as colab_files
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
+
+# Install Liberation Sans font — only on Linux (Colab), not needed on Mac/Windows
+if platform.system() == "Linux":
+    subprocess.run(["apt-get", "-qq", "install", "-y", "fonts-liberation"], check=False)
+
+print(f"Running in: {'Google Colab' if IN_COLAB else 'local environment'} ({platform.system()})")
+
+
+#2. Font size settings
+
+FONT_SIZE_BASE       = 20
+FONT_SIZE_TITLE      = 24
+FONT_SIZE_AXIS_LABEL = 20
+FONT_SIZE_LEGEND     = 14
+FONT_SIZE_TABLE      = 20
+FONT_SIZE_CAPTION    = 14
+
+
+#3. Configuration
+
+CONDS_TO_REMOVE = []
+SLOPE_T_MIN     = 0
+SLOPE_T_MAX     = 24
+
+matplotlib.rcParams.update({
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Liberation Sans", "Arial", "Helvetica", "DejaVu Sans"],
+    "font.size": FONT_SIZE_BASE,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+    "axes.spines.top": False,
+    "axes.spines.right": False
+})
+
+
+#4. User input — works both in Colab and locally
+
+def ask(prompt):
+    """Ask user a question — works in Colab (input) and locally (input)."""
+    return input(prompt).strip()
+
+print("Show captions below plots? (yes/no):")
+SHOW_CAPTIONS = ask("").lower() in ("yes", "y")
+print(f"Captions: {'ON' if SHOW_CAPTIONS else 'OFF'}")
+
+print("\nEnter control condition name (or fragment, case-insensitive), e.g. 'control':")
+CTRL_NAME = ask("")
+print(f"Control name set to: '{CTRL_NAME}'")
+
+print("\nEnter conditions to remove (comma-separated), or press Enter to keep all:")
+conds_remove_input = ask("")
+CONDS_TO_REMOVE = [c.strip() for c in conds_remove_input.split(",") if c.strip()] \
+                  if conds_remove_input else []
+print(f"Conditions to remove: {CONDS_TO_REMOVE if CONDS_TO_REMOVE else 'none'}")
+
+
+#5. Panel selection
+
+print("\n--- Panel selection ---")
+print("Always generated: A (raw GFP count), B (confluence), C (GFP density count), D (count table)")
+print()
+
+print("Generate panel E (raw GFP intensity)? (yes/no):")
+SHOW_E = ask("").lower() in ("yes", "y")
+
+print("Generate panel F (GFP intensity density GCU/confluence)? (yes/no):")
+SHOW_F = ask("").lower() in ("yes", "y")
+
+print("Generate panel G (intensity table)? (yes/no):")
+SHOW_G = ask("").lower() in ("yes", "y")
+
+SHOW_INTENSITY = SHOW_E or SHOW_F or SHOW_G
+print(f"\nPanels: A B C D | E={'ON' if SHOW_E else 'OFF'} F={'ON' if SHOW_F else 'OFF'} G={'ON' if SHOW_G else 'OFF'}")
+
+
+#6. File upload — Colab uses file picker, local uses path input
+
+def upload_file(prompt):
+    """
+    Upload or select a file.
+    - Colab: opens the file picker via files.upload()
+    - Local: asks for a file path
+    """
+    print(prompt)
+    if IN_COLAB:
+        uploaded = colab_files.upload()
+        return list(uploaded.keys())[0]
+    else:
+        path = ask("Enter file path: ")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"File not found: {path}")
+        return path
+
+gfp_file    = upload_file("Upload GFP count file (File 1):")
+conflu_file = upload_file("Upload confluence file (File 2):")
+
+if SHOW_INTENSITY:
+    int_file = upload_file("Upload GFP total integrated intensity GCU file (File 3):")
+else:
+    int_file = None
+    print("(Intensity file upload skipped)")
+
+
+#7. Helper functions
+
+def load_incucyte(path):
+    with open(path, "r", encoding="latin-1") as f:
+        lines = f.readlines()
+    hi = next(i for i, l in enumerate(lines) if l.startswith("Date Time"))
+    df = pd.read_csv(path, sep="\t", decimal=",", skiprows=hi, encoding="latin-1")
+    df["Date Time"] = pd.to_datetime(df["Date Time"], format="mixed", dayfirst=True)
+    df.columns = df.columns.str.strip()
+    return df.sort_values("Elapsed").reset_index(drop=True)
+
+def get_sd(df, col):
+    col_s = " ".join(col.strip().split())
+    for c in df.columns:
+        if " ".join(c.strip().split()) == col_s + " (Std Dev Img)":
+            return df[c].values
+    return np.zeros(len(df))
+
+def build_col_map(source_conds, target_cols):
+    target_data = [c for c in target_cols
+                   if "Std Dev" not in c and c not in ["Date Time", "Elapsed"]]
+    mapping = {}
+    for rc in source_conds:
+        if rc in target_data:
+            mapping[rc] = rc; continue
+        best, best_len = None, 0
+        for cc in target_data:
+            if (cc in rc or rc in cc) and len(cc) > best_len:
+                best, best_len = cc, len(cc)
+        if best:
+            mapping[rc] = best; continue
+        rc_words = set(rc.lower().split())
+        best_len = 0
+        for cc in target_data:
+            overlap = len(rc_words & set(cc.lower().split()))
+            if overlap > best_len:
+                best, best_len = cc, overlap
+        mapping[rc] = best if best else rc
+    return mapping
+
+def compute_density(source_df, conflu_df, col_map_fn, conds):
+    density    = {}
+    density_sd = {}
+    for col in conds:
+        r      = source_df[col].values
+        c      = conflu_df[col_map_fn(col)].values
+        c_safe = np.where(c == 0, np.nan, c)
+        sd_r   = get_sd(source_df, col)
+        sd_c   = get_sd(conflu_df, col_map_fn(col))
+        rn     = r / c_safe
+        sd_rn  = rn * np.sqrt((sd_r / np.where(r == 0, 1, r))**2 +
+                               (sd_c / np.where(c == 0, 1, c))**2)
+        density[col]    = rn
+        density_sd[col] = sd_rn
+    return density, density_sd
+
+def compute_metrics(conds, conflu_df, col_map_fn, density, ctrl_density,
+                    ctrl, time, slope_t_min, slope_t_max,
+                    density_label="GFP delivery\nfold vs ctrl",
+                    slope_label="GFP accum.\nslope (cnt/%/h)"):
+    results = []
+    for col in conds:
+        y_conflu = conflu_df[col_map_fn(col)].values
+        rn       = density[col]
+
+        growth_index = y_conflu[-1] / y_conflu[0] if y_conflu[0] != 0 else np.nan
+
+        ctrl_density_end = ctrl_density[-1] if ctrl_density[-1] != 0 else np.nan
+        delivery_fold = rn[-1] / ctrl_density_end if ctrl_density_end else np.nan
+
+        gfp_above_ctrl = rn - ctrl_density
+        mask = (time >= slope_t_min) & (time <= slope_t_max)
+        slope, _ = np.polyfit(time[mask], gfp_above_ctrl[mask], 1) if mask.sum() >= 2 \
+                   else (np.nan, np.nan)
+
+        results.append([
+            col.strip(),
+            f"{growth_index:.3f}",
+            f"{delivery_fold:.2f}" if not np.isnan(delivery_fold) else "-",
+            f"{slope:.4f}" if not np.isnan(slope) else "-"
+        ])
+
+    results_df = pd.DataFrame(results, columns=[
+        "Condition",
+        "Growth index",
+        density_label,
+        slope_label
+    ])
+    return results, results_df
+
+def draw_table(ax, results_df):
+    col_labels = results_df.columns.tolist()
+    cell_data  = [list(row) for row in results_df.values.tolist()]
+    n_rows = len(cell_data)
+    n_cols = len(col_labels)
+
+    WRAP_WIDTH = 22
+    for i in range(n_rows):
+        val = str(cell_data[i][0])
+        if len(val) > WRAP_WIDTH:
+            cell_data[i][0] = "\n".join(textwrap.wrap(val, WRAP_WIDTH))
+
+    col_widths = []
+    for j in range(n_cols):
+        header_lines = str(col_labels[j]).split("\n")
+        header_max   = max(len(l) for l in header_lines)
+        data_max = 0
+        for row in cell_data:
+            for l in str(row[j]).split("\n"):
+                data_max = max(data_max, len(l))
+        col_widths.append(max(header_max, data_max))
+
+    total = sum(col_widths)
+    col_widths_norm = [w / total for w in col_widths]
+
+    max_header_lines = max(len(str(c).split("\n")) for c in col_labels)
+    max_data_lines   = max(
+        max(len(str(row[j]).split("\n")) for j in range(n_cols))
+        for row in cell_data
+    )
+    LINE_H  = FONT_SIZE_TABLE * 0.0013
+    PADDING = 0.012
+
+    header_height = LINE_H * max_header_lines + PADDING
+    data_height   = LINE_H * max_data_lines   + PADDING
+    header_height = max(header_height, 0.045)
+    data_height   = max(data_height,   0.038)
+
+    table = ax.table(cellText=cell_data, colLabels=col_labels,
+                     cellLoc="center", loc="center",
+                     colWidths=col_widths_norm,
+                     bbox=[0, 0, 1, 1])
+    table.auto_set_font_size(False)
+    table.set_fontsize(FONT_SIZE_TABLE)
+
+    for (row, col), cell in table.get_celld().items():
+        if row == 0:
+            cell.set_height(header_height)
+        else:
+            cell.set_height(data_height)
+
+    for j in range(n_cols):
+        cell = table[0, j]
+        cell.set_facecolor("#f0f0f0")
+        cell.set_text_props(fontweight="bold", color="black",
+                            verticalalignment="center")
+        cell.set_edgecolor("#aaaaaa")
+        cell.set_linewidth(1.2)
+
+    for i in range(1, n_rows + 1):
+        bg = "#ffffff" if i % 2 == 1 else "#f9f9f9"
+        for j in range(n_cols):
+            cell = table[i, j]
+            cell.set_facecolor(bg)
+            cell.set_edgecolor("#cccccc")
+            cell.set_linewidth(0.8)
+            cell.set_text_props(color="black", verticalalignment="center")
+
+    return table
+
+
+#8. Load and align time points
+
+gfp    = load_incucyte(gfp_file)
+conflu = load_incucyte(conflu_file)
+
+common_t = np.intersect1d(gfp["Elapsed"].values, conflu["Elapsed"].values)
+
+if SHOW_INTENSITY:
+    intens   = load_incucyte(int_file)
+    common_t = np.intersect1d(common_t, intens["Elapsed"].values)
+
+gfp    = gfp[gfp["Elapsed"].isin(common_t)].reset_index(drop=True)
+conflu = conflu[conflu["Elapsed"].isin(common_t)].reset_index(drop=True)
+if SHOW_INTENSITY:
+    intens = intens[intens["Elapsed"].isin(common_t)].reset_index(drop=True)
+
+conds = [c for c in gfp.columns
+         if "Std Dev" not in c and c not in ["Date Time", "Elapsed"]]
+conds = [c for c in conds if c.strip() not in CONDS_TO_REMOVE]
+
+ctrl_matches = [c for c in conds if CTRL_NAME.lower() in c.lower()]
+if not ctrl_matches:
+    raise ValueError(f"Control '{CTRL_NAME}' not found. Available: {conds}")
+ctrl = ctrl_matches[0]
+print(f"Control condition (count): {repr(ctrl)}")
+
+col_map_gfp = build_col_map(conds, conflu.columns)
+print("\n=== GFP count -> Confluence column mapping ===")
+for k, v in col_map_gfp.items():
+    print(f"  {repr(k)} -> {repr(v)}")
+
+if SHOW_INTENSITY:
+    conds_int = [c for c in intens.columns
+                 if "Std Dev" not in c and c not in ["Date Time", "Elapsed"]]
+    conds_int = [c for c in conds_int if c.strip() not in CONDS_TO_REMOVE]
+
+    col_map_int = build_col_map(conds_int, conflu.columns)
+    print("\n=== GFP intensity -> Confluence column mapping ===")
+    for k, v in col_map_int.items():
+        print(f"  {repr(k)} -> {repr(v)}")
+
+    for mapping_name, mapping in [("GFP count -> confluence", col_map_gfp),
+                                   ("GFP intensity -> confluence", col_map_int)]:
+        dups = [v for v, n in Counter(mapping.values()).items() if n > 1]
+        if dups:
+            print(f"\n!!! WARNING: duplicate mappings in {mapping_name}: {dups}")
+
+def get_conflu_gfp(col):
+    return col_map_gfp.get(col, col)
+
+def get_conflu_int(col):
+    return col_map_int.get(col, col)
+
+time = gfp["Elapsed"].values
+
+if SHOW_INTENSITY:
+    ctrl_int_matches = [c for c in conds_int if CTRL_NAME.lower() in c.lower()]
+    if not ctrl_int_matches:
+        raise ValueError(f"Control '{CTRL_NAME}' not found in intensity file. Available: {conds_int}")
+    ctrl_int = ctrl_int_matches[0]
+    print(f"Control condition (intensity): {repr(ctrl_int)}")
+
+
+#9. Colour palette
+
+pub_palette = ["#1f77b4", "#e377c2", "#ff7f0e", "#9467bd",
+               "#17becf", "#bcbd22", "#7f7f7f", "#8c564b"]
+markers = ["o", "s", "D", "^", "v", "p", "*", "h"]
+
+
+#10. Calculations
+
+gfp_density, gfp_density_sd = compute_density(
+    gfp, conflu, get_conflu_gfp, conds)
+ctrl_density = gfp_density[ctrl]
+
+results_count, results_count_df = compute_metrics(
+    conds, conflu, get_conflu_gfp,
+    gfp_density, ctrl_density,
+    ctrl, time, SLOPE_T_MIN, SLOPE_T_MAX,
+    density_label="GFP synthesis",
+    slope_label="GFP accum.slope (cnt/%/h)"
+)
+
+if SHOW_INTENSITY:
+    int_density, int_density_sd = compute_density(
+        intens, conflu, get_conflu_int, conds_int)
+    ctrl_int_density = int_density[ctrl_int]
+
+    results_int, results_int_df = compute_metrics(
+        conds_int, conflu, get_conflu_int,
+        int_density, ctrl_int_density,
+        ctrl_int, time, SLOPE_T_MIN, SLOPE_T_MAX,
+        density_label="GFP intensity\nfold vs ctrl (GCU/%)",
+        slope_label="GFP int. accum.\nslope (GCU/%/h)"
+    )
+
+
+#11. Figure layout — dynamic based on selected panels
+
+n_plot_rows  = 2 + (1 if SHOW_F else 0)
+n_table_rows = 1 + (1 if SHOW_G else 0)
+n_rows       = n_plot_rows + n_table_rows
+
+if IN_COLAB:
+    # ---- Colab layout (original, tested) ------------------------------------
+    PLOT_ROW_HEIGHT          = 5
+    TABLE_ROW_HEIGHT         = 2.2
+    FIG_WIDTH                = 20
+    FIG_HEIGHT_BASE          = 8
+    FIG_HEIGHT_PER_PLOT_ROW  = 7
+    FIG_HEIGHT_PER_TABLE_ROW = 7
+    HSPACE                   = 0.35
+    WSPACE                   = 0.45
+    GS_LEFT, GS_RIGHT        = 0.07, 0.92
+else:
+    # ---- Local layout (wider figure, more spacing for desktop window) -------
+    PLOT_ROW_HEIGHT          = 5
+    TABLE_ROW_HEIGHT         = 2.2
+    FIG_WIDTH                = 26
+    FIG_HEIGHT_BASE          = 8
+    FIG_HEIGHT_PER_PLOT_ROW  = 7
+    FIG_HEIGHT_PER_TABLE_ROW = 7
+    HSPACE                   = 0.55
+    WSPACE                   = 0.55
+    GS_LEFT, GS_RIGHT        = 0.10, 0.88
+
+height_ratios = [PLOT_ROW_HEIGHT] * n_plot_rows + [TABLE_ROW_HEIGHT] * n_table_rows
+fig_height = (FIG_HEIGHT_BASE
+              + FIG_HEIGHT_PER_PLOT_ROW  * n_plot_rows
+              + FIG_HEIGHT_PER_TABLE_ROW * n_table_rows)
+
+fig = plt.figure(figsize=(FIG_WIDTH, fig_height))
+gs  = gridspec.GridSpec(n_rows, 2, hspace=HSPACE, wspace=WSPACE,
+                        height_ratios=height_ratios)
+gs.update(left=GS_LEFT, right=GS_RIGHT)
+
+ax1 = fig.add_subplot(gs[0, 0])   # A
+ax2 = fig.add_subplot(gs[0, 1])   # B
+ax3 = fig.add_subplot(gs[1, 0])   # C
+ax5 = fig.add_subplot(gs[1, 1]) if SHOW_E else None   # E
+ax6 = fig.add_subplot(gs[2, 0]) if SHOW_F else None   # F
+ax4 = fig.add_subplot(gs[n_plot_rows, :])              # D
+ax7 = fig.add_subplot(gs[n_plot_rows + 1, :]) if SHOW_G else None  # G
+
+
+# ---- Panel A: Raw GFP count ------------------------------------------------
+
+for col, marker, color in zip(conds, itertools.cycle(markers), itertools.cycle(pub_palette)):
+    ax1.errorbar(time, gfp[col], yerr=get_sd(gfp, col),
+                 fmt=marker, markersize=6, linewidth=1.5, capsize=3,
+                 label=col.strip(), color=color)
+ax1.set_xlabel("Elapsed time (hours)", fontsize=FONT_SIZE_AXIS_LABEL)
+ax1.set_ylabel("GFP+ object count (per well)", fontsize=FONT_SIZE_AXIS_LABEL)
+ax1.set_title("A   GFP-expressing cell count (raw)",
+              loc="left", fontweight="bold", fontsize=FONT_SIZE_TITLE)
+ax1.tick_params(labelsize=FONT_SIZE_BASE)
+ax1.legend(frameon=False, fontsize=FONT_SIZE_LEGEND,
+           loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
+if SHOW_CAPTIONS:
+    ax1.text(0.5, -0.18,
+             "Raw number of GFP+ objects per well. Error bars = Std Dev Img.",
+             transform=ax1.transAxes, ha="center", va="top",
+             fontsize=FONT_SIZE_CAPTION, color="#444444", style="italic")
+
+# ---- Panel B: Confluence ---------------------------------------------------
+
+for col, marker, color in zip(conds, itertools.cycle(markers), itertools.cycle(pub_palette)):
+    ax2.errorbar(time, conflu[get_conflu_gfp(col)],
+                 yerr=get_sd(conflu, get_conflu_gfp(col)),
+                 fmt=marker, markersize=6, linewidth=1.5, capsize=3,
+                 label=col.strip(), color=color)
+ax2.set_xlabel("Elapsed time (hours)", fontsize=FONT_SIZE_AXIS_LABEL)
+ax2.set_ylabel("Confluence (%)", fontsize=FONT_SIZE_AXIS_LABEL)
+ax2.set_title("B   Cell confluence (proliferation / cytotoxicity check)",
+              loc="left", fontweight="bold", fontsize=FONT_SIZE_TITLE)
+ax2.tick_params(labelsize=FONT_SIZE_BASE)
+ax2.legend(frameon=False, fontsize=FONT_SIZE_LEGEND,
+           loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
+ax2.set_ylim(0, 100)
+if SHOW_CAPTIONS:
+    ax2.text(0.5, -0.18,
+             "Percentage of well area covered by cells. Differences may indicate cytotoxicity.",
+             transform=ax2.transAxes, ha="center", va="top",
+             fontsize=FONT_SIZE_CAPTION, color="#444444", style="italic")
+
+# ---- Panel C: GFP density (count / confluence) ----------------------------
+
+for col, marker, color in zip(conds, itertools.cycle(markers), itertools.cycle(pub_palette)):
+    ax3.errorbar(time, gfp_density[col], yerr=gfp_density_sd[col],
+                 fmt=marker, markersize=6, linewidth=1.5, capsize=3,
+                 label=col.strip(), color=color)
+ax3.set_xlabel("Elapsed time (hours)", fontsize=FONT_SIZE_AXIS_LABEL)
+ax3.set_ylabel("GFP count / confluence (%)", fontsize=FONT_SIZE_AXIS_LABEL)
+ax3.set_title("C   GFP density per cell — count (normalised to confluence)",
+              loc="left", fontweight="bold", fontsize=FONT_SIZE_TITLE)
+ax3.tick_params(labelsize=FONT_SIZE_BASE)
+ax3.legend(frameon=False, fontsize=FONT_SIZE_LEGEND,
+           loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
+if SHOW_CAPTIONS:
+    ax3.text(0.5, -0.18,
+             "GFP+ count / confluence — approximate GFP signal per cell.",
+             transform=ax3.transAxes, ha="center", va="top",
+             fontsize=FONT_SIZE_CAPTION, color="#444444", style="italic")
+
+# ---- Panel E: Raw GFP intensity (optional) ---------------------------------
+
+if SHOW_E and ax5 is not None:
+    for col, marker, color in zip(conds_int, itertools.cycle(markers), itertools.cycle(pub_palette)):
+        ax5.errorbar(time, intens[col], yerr=get_sd(intens, col),
+                     fmt=marker, markersize=6, linewidth=1.5, capsize=3,
+                     label=col.strip(), color=color)
+    ax5.set_xlabel("Elapsed time (hours)", fontsize=FONT_SIZE_AXIS_LABEL)
+    ax5.set_ylabel("GFP total integrated intensity (GCU)", fontsize=FONT_SIZE_AXIS_LABEL)
+    ax5.set_title("E   GFP total integrated intensity (raw)",
+                  loc="left", fontweight="bold", fontsize=FONT_SIZE_TITLE)
+    ax5.tick_params(labelsize=FONT_SIZE_BASE)
+    ax5.legend(frameon=False, fontsize=FONT_SIZE_LEGEND,
+               loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
+    if SHOW_CAPTIONS:
+        ax5.text(0.5, -0.18,
+                 "Raw GFP total integrated intensity per well. Error bars = Std Dev Img.",
+                 transform=ax5.transAxes, ha="center", va="top",
+                 fontsize=FONT_SIZE_CAPTION, color="#444444", style="italic")
+
+# ---- Panel F: GFP intensity density (optional) -----------------------------
+
+if SHOW_F and ax6 is not None:
+    for col, marker, color in zip(conds_int, itertools.cycle(markers), itertools.cycle(pub_palette)):
+        ax6.errorbar(time, int_density[col], yerr=int_density_sd[col],
+                     fmt=marker, markersize=6, linewidth=1.5, capsize=3,
+                     label=col.strip(), color=color)
+    ax6.set_xlabel("Elapsed time (hours)", fontsize=FONT_SIZE_AXIS_LABEL)
+    ax6.set_ylabel("GFP intensity / confluence (GCU / %)", fontsize=FONT_SIZE_AXIS_LABEL)
+    ax6.set_title("F   GFP intensity density per cell — GCU (normalised to confluence)",
+                  loc="left", fontweight="bold", fontsize=FONT_SIZE_TITLE)
+    ax6.tick_params(labelsize=FONT_SIZE_BASE)
+    ax6.legend(frameon=False, fontsize=FONT_SIZE_LEGEND,
+               loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
+    if SHOW_CAPTIONS:
+        ax6.text(0.5, -0.18,
+                 "GFP total integrated intensity (GCU) / confluence — GFP intensity per cell area.",
+                 transform=ax6.transAxes, ha="center", va="top",
+                 fontsize=FONT_SIZE_CAPTION, color="#444444", style="italic")
+
+# ---- Panel D: Metrics table (count) — full width ---------------------------
+
+ax4.axis("off")
+ax4.set_title("D   Summary metrics — GFP count",
+              loc="left", fontweight="bold", fontsize=FONT_SIZE_TITLE)
+draw_table(ax4, results_count_df)
+if SHOW_CAPTIONS:
+    ax4.text(0.5, -0.06,
+             "Growth index = confluence[t_final] / confluence[t_0].\n"
+             "GFP synthesis fold = gfp_density_cond[t_final] / gfp_density_ctrl[t_final].\n"
+             f"Slope = linear regression of gfp_above_ctrl within t = {SLOPE_T_MIN}–{SLOPE_T_MAX} h.",
+             transform=ax4.transAxes, ha="center", va="top",
+             fontsize=FONT_SIZE_CAPTION, color="#444444", style="italic")
+
+# ---- Panel G: Metrics table (intensity, optional) --------------------------
+
+if SHOW_G and ax7 is not None:
+    ax7.axis("off")
+    ax7.set_title("G   Summary metrics — GFP intensity (GCU)",
+                  loc="left", fontweight="bold", fontsize=FONT_SIZE_TITLE)
+    draw_table(ax7, results_int_df)
+    if SHOW_CAPTIONS:
+        ax7.text(0.5, -0.06,
+                 "Growth index = confluence[t_final] / confluence[t_0].\n"
+                 "Intensity fold = int_density_cond[t_final] / int_density_ctrl[t_final].\n"
+                 f"Slope = linear regression of intensity_above_ctrl within t = {SLOPE_T_MIN}–{SLOPE_T_MAX} h.",
+                 transform=ax7.transAxes, ha="center", va="top",
+                 fontsize=FONT_SIZE_CAPTION, color="#444444", style="italic")
+
+
+#12. Save files
+
+gfp_name         = os.path.splitext(os.path.basename(gfp_file))[0]
+output_png       = f"{gfp_name}_gfp_delivery_analysis.png"
+output_csv_count = f"{gfp_name}_gfp_count_metrics.csv"
+
+plt.savefig(output_png, dpi=300, bbox_inches="tight", facecolor="white")
+plt.show()
+print(f"Figure saved: {output_png}")
+
+pd.DataFrame(results_count, columns=[
+    "Condition",
+    "Growth index",
+    "GFP synthesis fold vs ctrl (t_end)",
+    f"GFP count accumulation slope (cnt/%/h, t={SLOPE_T_MIN}-{SLOPE_T_MAX}h)"
+]).to_csv(output_csv_count, index=False)
+print(f"Count metrics saved: {output_csv_count}")
+
+if IN_COLAB:
+    colab_files.download(output_png)
+    colab_files.download(output_csv_count)
+
+if SHOW_INTENSITY:
+    output_csv_int = f"{gfp_name}_gfp_intensity_metrics.csv"
+    pd.DataFrame(results_int, columns=[
+        "Condition",
+        "Growth index",
+        "GFP intensity fold vs ctrl — GCU/% (t_end)",
+        f"GFP intensity accumulation slope (GCU/%/h, t={SLOPE_T_MIN}-{SLOPE_T_MAX}h)"
+    ]).to_csv(output_csv_int, index=False)
+    print(f"Intensity metrics saved: {output_csv_int}")
+    if IN_COLAB:
+        colab_files.download(output_csv_int)
