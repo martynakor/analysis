@@ -112,6 +112,5 @@ SLOPE_T_MAX = 24          # end of accumulation slope window (hours)
 If you use this script in your work, please cite the repository:
 
 ```
-Korycka, M. (2025). GFP Delivery Analysis — Incucyte Live-Cell Imaging.
 GitHub. https://github.com/martynakor/analysis
 ```
