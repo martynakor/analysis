@@ -10,9 +10,9 @@ A Python script for automated analysis of GFP delivery experiments performed on 
 - Aligns time points across files and filters selected conditions
 - Normalises GFP signal by confluence to account for differences in cell number
 - Computes per-condition summary metrics:
-  - **Growth index** — confluence at end / confluence at start (proliferation / cytotoxicity check)
-  - **GFP delivery fold** — GFP density relative to control at the end of the experiment
-  - **Accumulation slope** — rate of GFP increase above control within a user-defined time window
+  - **Growth index** - confluence at end / confluence at start (proliferation / cytotoxicity check)
+  - **GFP delivery fold** - GFP density relative to control at the end of the experiment
+  - **Accumulation slope** - rate of GFP increase above control within a user-defined time window
 - Generates a **multi-panel figure** (PNG, 300 dpi) ready for a paper or presentation
 - Exports metrics to **CSV**
 
