@@ -1,4 +1,4 @@
-# GFP Delivery Analysis
+# GFP Analysis
 
 A Python script for automated analysis of GFP delivery experiments performed on the **Incucyte live-cell imaging system**. It takes raw export files, normalises the GFP signal to cellular confluence, and generates a publication-ready multi-panel figure together with a CSV summary.
 
