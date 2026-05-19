@@ -53,7 +53,7 @@ pip install -r requirements.txt
 
 1. Open a new Colab notebook
 2. Upload `analysis.py`
-3. Run it — the script will prompt you to upload your data files via the Colab file picker
+3. Run it - the script will prompt you to upload your data files via the Colab file picker
 
 ### Local environment
 
@@ -89,8 +89,8 @@ Files are automatically aligned by elapsed time points; minor column name differ
 | File | Description |
 |------|-------------|
 | `<input_name>_gfp_delivery_analysis.png` | Multi-panel figure (300 dpi) |
-| `<input_name>_gfp_count_metrics.csv` | Summary metrics — count-based |
-| `<input_name>_gfp_intensity_metrics.csv` | Summary metrics — intensity-based (if panels E/F/G selected) |
+| `<input_name>_gfp_count_metrics.csv` | Summary metrics - count-based |
+| `<input_name>_gfp_intensity_metrics.csv` | Summary metrics - intensity-based (if panels E/F/G selected) |
 
 ---
 
