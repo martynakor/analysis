@@ -11,8 +11,8 @@ A Python script for automated analysis of GFP experiments performed on the **Inc
 - Normalises GFP signal by confluence to account for differences in cell number
 - Computes per-condition summary metrics:
   - **Growth index** - confluence at end / confluence at start (proliferation / cytotoxicity check)
-  - **GFP delivery fold** - GFP density relative to control at the end of the experiment
-  - **Accumulation slope** - rate of GFP increase above control within a user-defined time window
+  - **GFP synthesis fold** - GFP density relative to control at the end of the experiment
+  - **GFP count accumulation slope ** - rate of GFP increase above control within a user-defined time window
 - Generates a **multi-panel figure** (PNG, 300 dpi) ready for a paper or presentation
 - Exports metrics to **CSV**
 
@@ -25,7 +25,7 @@ Works both in **Google Colab** and as a **local Python script**.
 | Panel | Content | Always shown |
 |-------|---------|:---:|
 | A | Raw GFP+ object count per well | ✅ |
-| B | Cell confluence (proliferation / cytotoxicity check) | ✅ |
+| B | Cell confluence | ✅ |
 | C | GFP count normalised to confluence | ✅ |
 | D | Summary metrics table (count-based) | ✅ |
 | E | Raw GFP total integrated intensity (GCU) | optional |
