@@ -231,34 +231,35 @@ def compute_density(source_df, conflu_df, col_map_fn, conds):
     return density, density_sd
 
 def compute_metrics(conds, conflu_df, col_map_fn, density, ctrl_density,
-                    ctrl, time, slope_t_min, slope_t_max,
-                    density_label="GFP delivery\nfold vs ctrl",
+                    ctrl, time, source_df, slope_t_min, slope_t_max,
+                    density_label="GFP count\nat t=24h",
                     slope_label="GFP accum.\nslope (cnt/%/h)"):
     """
     Compute per-condition summary metrics:
 
-    - Growth index      : confluence[t_final] / confluence[t_0]
-                          >1 = proliferation, <1 = cytotoxicity / growth arrest
-    - Delivery fold     : density_cond[t_final] / density_ctrl[t_final]
-                          GFP signal relative to the control at the end of the experiment
-    - Accumulation slope: slope of (density_cond − density_ctrl) vs. time
-                          within the [slope_t_min, slope_t_max] window (linear regression)
-
-    Returns a plain list of rows and a formatted DataFrame for the table panel.
+    - Growth index    : confluence[t_final] / confluence[t_0]
+    - GFP count t24h  : raw GFP object count at t=24h (replaces fold vs ctrl)
+    - Accum. slope    : slope of (density_cond − density_ctrl) vs. time
+                        within the [slope_t_min, slope_t_max] window
     """
+    # Find index of t=24h
+    t24_idx = np.where(time == 24)[0]
+
     results = []
     for col in conds:
         y_conflu = conflu_df[col_map_fn(col)].values
-        rn       = density[col]
 
-        # Growth index: ratio of final to initial confluence
+        # Growth index
         growth_index = y_conflu[-1] / y_conflu[0] if y_conflu[0] != 0 else np.nan
 
-        # Delivery fold: how much GFP density this condition has vs. control at t_end
-        ctrl_density_end = ctrl_density[-1] if ctrl_density[-1] != 0 else np.nan
-        delivery_fold = rn[-1] / ctrl_density_end if ctrl_density_end else np.nan
+        # Raw GFP count at t=24h
+        if len(t24_idx) > 0:
+            gfp_count_24h = source_df[col].values[t24_idx[0]]
+        else:
+            gfp_count_24h = np.nan
 
-        # Accumulation slope: rate of GFP increase above control within the chosen window
+        # Accumulation slope
+        rn = density[col]
         gfp_above_ctrl = rn - ctrl_density
         mask = (time >= slope_t_min) & (time <= slope_t_max)
         slope, _ = np.polyfit(time[mask], gfp_above_ctrl[mask], 1) if mask.sum() >= 2 \
@@ -267,7 +268,7 @@ def compute_metrics(conds, conflu_df, col_map_fn, density, ctrl_density,
         results.append([
             col.strip(),
             f"{growth_index:.3f}",
-            f"{delivery_fold:.2f}" if not np.isnan(delivery_fold) else "-",
+            f"{gfp_count_24h:.1f}" if not np.isnan(gfp_count_24h) else "-",
             f"{slope:.4f}" if not np.isnan(slope) else "-"
         ])
 
@@ -462,8 +463,8 @@ ctrl_density = gfp_density[ctrl]
 results_count, results_count_df = compute_metrics(
     conds, conflu, get_conflu_gfp,
     gfp_density, ctrl_density,
-    ctrl, time, SLOPE_T_MIN, SLOPE_T_MAX,
-    density_label="GFP synthesis",
+    ctrl, time, gfp, SLOPE_T_MIN, SLOPE_T_MAX,
+    density_label="GFP count\nat t=24h",
     slope_label="GFP accum.slope (cnt/%/h)"
 )
 
@@ -475,12 +476,12 @@ if SHOW_INTENSITY:
     ctrl_int_density = int_density[ctrl_int]
 
     results_int, results_int_df = compute_metrics(
-        conds_int, conflu, get_conflu_int,
-        int_density, ctrl_int_density,
-        ctrl_int, time, SLOPE_T_MIN, SLOPE_T_MAX,
-        density_label="GFP intensity\nfold vs ctrl (GCU/%)",
-        slope_label="GFP int. accum.\nslope (GCU/%/h)"
-    )
+    conds_int, conflu, get_conflu_int,
+    int_density, ctrl_int_density,
+    ctrl_int, time, intens, SLOPE_T_MIN, SLOPE_T_MAX,
+    density_label="GFP intensity\nat t=24h (GCU)",
+    slope_label="GFP int. accum.\nslope (GCU/%/h)"
+)
 
 
 #11. Figure layout — dynamic based on selected panels
